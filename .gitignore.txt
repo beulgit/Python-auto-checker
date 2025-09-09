@@ -1,0 +1,16 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore local database
+submissions.db
+
+# Ignore virtual environments
+venv/
+.venv/
+
+# Ignore secrets
+credentials.json
+
+# Ignore temporary student code files
+student_*.py

@@ -9,6 +9,8 @@ st.set_page_config(page_title="Python Auto-Checker IDE", layout="wide")
 def get_conn():
     conn = sqlite3.connect("submissions.db", check_same_thread=False)
     c = conn.cursor()
+
+    # Submissions table
     c.execute("""
         CREATE TABLE IF NOT EXISTS submissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,6 +23,27 @@ def get_conn():
             created_at TEXT
         )
     """)
+
+    # Questions table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT,
+            created_at TEXT
+        )
+    """)
+
+    # Testcases table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS testcases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER,
+            input TEXT,
+            output TEXT,
+            FOREIGN KEY(question_id) REFERENCES questions(id)
+        )
+    """)
+
     conn.commit()
     return conn
 
@@ -38,27 +61,47 @@ mode = st.sidebar.selectbox("Mode", ["Student", "Teacher"])
 st.sidebar.header("Upload Question File (Teacher)")
 question_file = st.sidebar.file_uploader("Upload TXT file (Question + testcases)", type=["txt"])
 
-question_text = ""
-testcases = []  # 🔹 store multiple testcases
-
 if question_file:
     content = question_file.read().decode("utf-8").split("###")
-    # First element is the question
     question_text = content[0].strip()
-    # Remaining should come in pairs (input, output)
+    testcases = []
+
     if (len(content) - 1) % 2 == 0:
         for i in range(1, len(content), 2):
             inp, out = content[i].strip(), content[i+1].strip()
             testcases.append((inp, out))
+
+        # Save to DB
+        with conn:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO questions (text, created_at) VALUES (?, ?)",
+                        (question_text, datetime.datetime.now().isoformat(timespec="seconds")))
+            qid = cur.lastrowid
+            for inp, out in testcases:
+                cur.execute("INSERT INTO testcases (question_id, input, output) VALUES (?, ?, ?)",
+                            (qid, inp, out))
+        st.sidebar.success("✅ Question uploaded and saved successfully!")
+
     else:
         st.sidebar.error("Invalid format. Use: Question###Input1###Output1###Input2###Output2###...")
 
 # ---------- Student Mode ----------
 if mode == "Student":
     st.title("Python Learning IDE — Student Mode")
-    if question_text:
+
+    row = conn.execute("SELECT id, text FROM questions ORDER BY id DESC LIMIT 1").fetchone()
+    if row:
+        qid, question_text = row
         st.subheader("Question")
         st.write(question_text)
+
+        # Fetch testcases for latest question
+        testcases = conn.execute("SELECT input, output FROM testcases WHERE question_id=?",
+                                 (qid,)).fetchall()
+    else:
+        question_text = ""
+        testcases = []
+        st.warning("⚠️ No question uploaded yet by the teacher.")
 
     code = st.text_area("Write your Python Code here:", height=250)
 

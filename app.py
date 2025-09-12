@@ -155,9 +155,16 @@ if mode == "Student":
 
         for idx, (expected_input, expected_output) in enumerate(testcases, start=1):
             try:
+                # Ensure multiple input lines are passed correctly
+                test_input = expected_input.strip()
+                if test_input:
+                    test_input = test_input + "\n"  # final newline
+                else:
+                    test_input = ""  # no input needed
+
                 proc = subprocess.run(
                     ["python", "-I", tmp_path],
-                    input=expected_input + "\n",  # pass all inputs
+                    input=test_input,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -175,10 +182,14 @@ if mode == "Student":
                 st.code(actual if actual else "(no output)")
 
                 if proc.stderr:
-                    st.subheader("Runtime Error")
-                    st.code(proc.stderr)
+                    if "EOFError" in proc.stderr:
+                        st.subheader("Runtime Error")
+                        st.error("❌ Not enough input values provided for this test case.")
+                    else:
+                        st.subheader("Runtime Error")
+                        st.code(proc.stderr)
 
-                if actual == expected:
+                if actual == expected and not proc.stderr:
                     st.success("✅ Passed")
                 else:
                     st.error("❌ Failed")

@@ -1,290 +1,155 @@
 import streamlit as st
-import subprocess, tempfile, os, uuid, datetime, sqlite3, json, re
+import subprocess, tempfile, os, sqlite3, uuid, datetime
 
 # ---------- App Config ----------
-st.set_page_config(page_title="Python Auto-Checker IDE", layout="wide")
+st.set_page_config("AutoChecker", "✅")
 
-# ---------- Database Init ----------
-@st.cache_resource
-def get_conn():
-    conn = sqlite3.connect("submissions.db", check_same_thread=False)
+DB_FILE = "autochecker.db"
+TEACHER_PASSWORD = "teacher123"   # 🔑 You can change this
+
+# ---------- Database Setup ----------
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-
-    # Submissions table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_name TEXT,
-            question TEXT,
-            code TEXT,
-            stdout TEXT,
-            stderr TEXT,
-            correct INTEGER,
-            created_at TEXT
-        )
-    """)
-
-    # Questions table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT,
-            created_at TEXT
-        )
-    """)
-
-    # Testcases table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS testcases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question_id INTEGER,
-            input TEXT,
-            output TEXT,
-            FOREIGN KEY(question_id) REFERENCES questions(id)
-        )
-    """)
-
+    c.execute('''CREATE TABLE IF NOT EXISTS questions (
+                    qid TEXT PRIMARY KEY,
+                    question TEXT,
+                    testcases TEXT
+                )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS submissions (
+                    sid TEXT PRIMARY KEY,
+                    qid TEXT,
+                    student_name TEXT,
+                    code TEXT,
+                    result TEXT,
+                    timestamp TEXT
+                )''')
     conn.commit()
-    return conn
+    conn.close()
 
-conn = get_conn()
+init_db()
 
-# ---------- Student Identification ----------
-student_name = st.text_input("Enter your Name / Roll No:")
-if not student_name.strip():
-    st.warning("⚠️ Please enter your name before running or submitting code.")
+# ---------- Helper Functions ----------
+def run_code(user_code, test_input):
+    """Run Python code with given input and return output or error."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w") as tmp:
+        tmp.write(user_code)
+        tmp_filename = tmp.name
 
-# ---------- Mode Selection ----------
-mode = st.sidebar.selectbox("Mode", ["Student", "Teacher"])
+    try:
+        result = subprocess.run(
+            ["python", tmp_filename],
+            input=test_input.encode(),
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.stdout.strip() if result.returncode == 0 else result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return "⏰ Timeout: Code took too long"
+    finally:
+        os.remove(tmp_filename)
 
-# ---------- Teacher Upload Section ----------
-st.sidebar.header("Upload Question File (Teacher)")
-question_file = st.sidebar.file_uploader("Upload TXT/JSON file (Question + testcases)", type=["txt", "json"])
+def save_question(qid, question, testcases):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("REPLACE INTO questions (qid, question, testcases) VALUES (?, ?, ?)",
+              (qid, question, testcases))
+    conn.commit()
+    conn.close()
 
-def parse_txt_format(content):
-    """
-    Parse teacher uploaded TXT format with INPUT/OUTPUT markers.
-    """
-    # First line should be question
-    lines = content.strip().splitlines()
-    if not lines[0].startswith("Question:"):
-        return None, []
-    question_text = lines[0].replace("Question:", "").strip()
+def get_question(qid):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT question, testcases FROM questions WHERE qid=?", (qid,))
+    row = c.fetchone()
+    conn.close()
+    return row if row else (None, None)
 
-    testcases = []
-    blocks = re.split(r"---+", content)[1:]  # split after question
-    for block in blocks:
-        inp, out = [], []
-        mode = None
-        for line in block.strip().splitlines():
-            if line.strip() == "INPUT":
-                mode = "input"
-                continue
-            elif line.strip() == "OUTPUT":
-                mode = "output"
-                continue
-            elif not line.strip():
-                continue
+def save_submission(qid, student_name, code, result):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    sid = str(uuid.uuid4())
+    timestamp = str(datetime.datetime.now())
+    c.execute("INSERT INTO submissions VALUES (?, ?, ?, ?, ?, ?)",
+              (sid, qid, student_name, code, result, timestamp))
+    conn.commit()
+    conn.close()
 
-            if mode == "input":
-                inp.append(line.strip())
-            elif mode == "output":
-                out.append(line.strip())
-        if inp and out:
-            testcases.append(("\n".join(inp), "\n".join(out)))
-    return question_text, testcases
+# ---------- UI ----------
+st.title("✅ AutoChecker")
 
-if question_file:
-    filename = question_file.name
-    content = question_file.read().decode("utf-8")
-
-    if filename.endswith(".txt"):
-        question_text, testcases = parse_txt_format(content)
-    elif filename.endswith(".json"):
-        data = json.loads(content)
-        question_text = data["question"]
-        testcases = [("\n".join(tc["input"]), "\n".join(tc["output"])) for tc in data["testcases"]]
-    else:
-        question_text, testcases = None, []
-
-    if question_text and testcases:
-        # Save to DB
-        with conn:
-            cur = conn.cursor()
-            cur.execute("INSERT INTO questions (text, created_at) VALUES (?, ?)",
-                        (question_text, datetime.datetime.now().isoformat(timespec="seconds")))
-            qid = cur.lastrowid
-            for inp, out in testcases:
-                cur.execute("INSERT INTO testcases (question_id, input, output) VALUES (?, ?, ?)",
-                            (qid, inp, out))
-        st.sidebar.success("✅ Question uploaded and saved successfully!")
-    else:
-        st.sidebar.error("Invalid format. Please follow the provided template.")
-
-# ---------- Student Mode ----------
-if mode == "Student":
-    st.title("Python Learning IDE — Student Mode")
-
-    row = conn.execute("SELECT id, text FROM questions ORDER BY id DESC LIMIT 1").fetchone()
-    if row:
-        qid, question_text = row
-        st.subheader("Question")
-        st.write(question_text)
-
-        # Fetch testcases for latest question
-        testcases = conn.execute("SELECT input, output FROM testcases WHERE question_id=?",
-                                 (qid,)).fetchall()
-    else:
-        question_text = ""
-        testcases = []
-        st.warning("⚠️ No question uploaded yet by the teacher.")
-
-    code = st.text_area("Write your Python Code here:", height=250)
-
-    run_clicked = st.button("Run Code")
-    submit_clicked = st.button("Submit to Teacher")
-
-    if run_clicked and code.strip() != "" and testcases:
-        tmp_path = os.path.join(tempfile.gettempdir(), f"student_{uuid.uuid4().hex}.py")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(code)
-
-        all_correct = True
-        combined_stdout = []
-        combined_stderr = []
-
-        for idx, (expected_input, expected_output) in enumerate(testcases, start=1):
-            try:
-                # Ensure multiple input lines are passed correctly
-                test_input = expected_input.strip()
-                if test_input:
-                    test_input = test_input + "\n"  # final newline
-                else:
-                    test_input = ""  # no input needed
-
-                proc = subprocess.run(
-                    ["python", "-I", tmp_path],
-                    input=test_input,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=5
-                )
-
-                actual = proc.stdout.replace("\r\n", "\n").rstrip()
-                expected = expected_output.replace("\r\n", "\n").rstrip()
-
-                st.write(f"---")
-                st.subheader(f"Test Case {idx}")
-                st.write("**Input:**")
-                st.code(expected_input)
-                st.write("**Program Output:**")
-                st.code(actual if actual else "(no output)")
-
-                if proc.stderr:
-                    if "EOFError" in proc.stderr:
-                        st.subheader("Runtime Error")
-                        st.error("❌ Not enough input values provided for this test case.")
-                    else:
-                        st.subheader("Runtime Error")
-                        st.code(proc.stderr)
-
-                if actual == expected and not proc.stderr:
-                    st.success("✅ Passed")
-                else:
-                    st.error("❌ Failed")
-                    st.write("**Expected Output:**")
-                    st.code(expected)
-                    st.write("**Actual Output:**")
-                    st.code(actual)
-                    all_correct = False
-
-                combined_stdout.append(actual)
-                combined_stderr.append(proc.stderr)
-
-            except subprocess.TimeoutExpired:
-                st.error(f"⏳ Timeout in Test Case {idx}: took longer than 5 seconds.")
-                all_correct = False
-
-        # Save in session state
-        st.session_state["last_correct"] = 1 if all_correct else 0
-        st.session_state["last_stdout"] = "\n---\n".join(combined_stdout)
-        st.session_state["last_stderr"] = "\n---\n".join(filter(None, combined_stderr))
-
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-
-    # ---------- Submit ----------
-    if submit_clicked:
-        if not student_name.strip():
-            st.warning("⚠️ Enter your name before submitting.")
-        elif not code.strip():
-            st.warning("⚠️ Write some code before submitting.")
-        else:
-            correct = st.session_state.get("last_correct", 0)
-            stdout = st.session_state.get("last_stdout", "")
-            stderr = st.session_state.get("last_stderr", "")
-            with conn:
-                conn.execute(
-                    "INSERT INTO submissions (student_name, question, code, stdout, stderr, correct, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        student_name.strip(),
-                        question_text.strip() if question_text else "(No question provided)",
-                        code,
-                        stdout,
-                        stderr,
-                        correct,
-                        datetime.datetime.now().isoformat(timespec="seconds")
-                    )
-                )
-            st.success("📬 Submitted to teacher!")
+mode = st.sidebar.radio("Choose Mode", ["Teacher", "Student"])
 
 # ---------- Teacher Mode ----------
-else:
-    st.title("Teacher Dashboard — View Submissions")
-    st.caption("Submissions are listed below. Filter by name or question.")
+if mode == "Teacher":
+    password = st.text_input("Enter Teacher Password", type="password")
+    if password == TEACHER_PASSWORD:
+        st.success("Access Granted ✅")
 
-    student_filter = st.text_input("Filter by student name (optional)")
-    q_filter = st.text_input("Filter by question text (optional)")
+        qid = st.text_input("Question ID (unique)", value="Q1")
+        question = st.text_area("Enter Question Description")
+        testcases = st.text_area(
+            "Enter Test Cases (Format: INPUT ... OUTPUT ... )",
+            height=200,
+            placeholder="---\nINPUT\n1\n2\nOUTPUT\n3\n---\nINPUT\n..."
+        )
 
-    query = "SELECT id, student_name, question, substr(code,1,200)||'...' as code_snippet, correct, created_at FROM submissions"
-    cond = []
-    params = []
-
-    if student_filter.strip():
-        cond.append("student_name LIKE ?")
-        params.append(f"%{student_filter.strip()}%")
-    if q_filter.strip():
-        cond.append("question LIKE ?")
-        params.append(f"%{q_filter.strip()}%")
-
-    if cond:
-        query += " WHERE " + " AND ".join(cond)
-    query += " ORDER BY id DESC"
-
-    rows = conn.execute(query, params).fetchall()
-
-    if not rows:
-        st.info("No submissions yet.")
+        if st.button("Save Question & Test Cases"):
+            save_question(qid, question, testcases)
+            st.success("Question & test cases saved ✅")
     else:
-        import pandas as pd
-        df = pd.DataFrame(rows, columns=["ID", "Student Name", "Question", "Code (snippet)", "Correct (1/0)", "Submitted At"])
-        st.dataframe(df, use_container_width=True)
+        st.warning("Enter correct teacher password")
 
-        sel = st.number_input("Open submission ID", min_value=0, value=0, step=1)
-        if sel:
-            row = conn.execute("SELECT * FROM submissions WHERE id=?", (int(sel),)).fetchone()
-            if row:
-                _, student, q, code_full, stdout, stderr, correct, ts = row
-                st.write(f"**Student:** {student} | **Submitted At:** {ts} | **Correct:** {'✅' if correct else '❌'}")
-                with st.expander("Question"):
-                    st.write(q)
-                with st.expander("Code"):
-                    st.code(code_full, language="python")
-                with st.expander("Program Output"):
-                    st.code(stdout or "(no output)")
-                if stderr:
-                    with st.expander("Runtime Error"):
-                        st.code(stderr)
+# ---------- Student Mode ----------
+elif mode == "Student":
+    qid = st.text_input("Enter Question ID to Attempt", value="Q1")
+    question, testcases = get_question(qid)
+
+    if not question:
+        st.error("No such question found. Ask teacher to set it first.")
+    else:
+        st.subheader("📌 Question")
+        st.write(question)
+
+        student_name = st.text_input("Your Name")
+        code_file = st.file_uploader("Upload your Python file", type=["py"])
+
+        if code_file and student_name:
+            user_code = code_file.read().decode()
+
+            # Parse test cases
+            raw_cases = testcases.strip().split("---")
+            results = []
+            all_passed = True
+
+            for case in raw_cases:
+                if not case.strip():
+                    continue
+                parts = case.strip().split("OUTPUT")
+                input_part = parts[0].replace("INPUT", "").strip()
+                expected_output = parts[1].strip() if len(parts) > 1 else ""
+                
+                actual_output = run_code(user_code, input_part).strip()
+                passed = (actual_output == expected_output)
+
+                results.append({
+                    "input": input_part,
+                    "expected": expected_output,
+                    "actual": actual_output,
+                    "status": "✅ Passed" if passed else "❌ Failed"
+                })
+                if not passed:
+                    all_passed = False
+
+            # Save submission
+            save_submission(qid, student_name, user_code,
+                            "All Passed" if all_passed else "Some Failed")
+
+            # Show results
+            st.subheader("📝 Results")
+            for r in results:
+                st.write(f"**Input:**\n{r['input']}")
+                st.write(f"**Expected:**\n{r['expected']}")
+                st.write(f"**Got:**\n{r['actual']}")
+                st.writ

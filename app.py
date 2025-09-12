@@ -1,5 +1,5 @@
 import streamlit as st
-import subprocess, tempfile, os, uuid, datetime, sqlite3
+import subprocess, tempfile, os, uuid, datetime, sqlite3, json, re
 
 # ---------- App Config ----------
 st.set_page_config(page_title="Python Auto-Checker IDE", layout="wide")
@@ -59,18 +59,55 @@ mode = st.sidebar.selectbox("Mode", ["Student", "Teacher"])
 
 # ---------- Teacher Upload Section ----------
 st.sidebar.header("Upload Question File (Teacher)")
-question_file = st.sidebar.file_uploader("Upload TXT file (Question + testcases)", type=["txt"])
+question_file = st.sidebar.file_uploader("Upload TXT/JSON file (Question + testcases)", type=["txt", "json"])
+
+def parse_txt_format(content):
+    """
+    Parse teacher uploaded TXT format with INPUT/OUTPUT markers.
+    """
+    # First line should be question
+    lines = content.strip().splitlines()
+    if not lines[0].startswith("Question:"):
+        return None, []
+    question_text = lines[0].replace("Question:", "").strip()
+
+    testcases = []
+    blocks = re.split(r"---+", content)[1:]  # split after question
+    for block in blocks:
+        inp, out = [], []
+        mode = None
+        for line in block.strip().splitlines():
+            if line.strip() == "INPUT":
+                mode = "input"
+                continue
+            elif line.strip() == "OUTPUT":
+                mode = "output"
+                continue
+            elif not line.strip():
+                continue
+
+            if mode == "input":
+                inp.append(line.strip())
+            elif mode == "output":
+                out.append(line.strip())
+        if inp and out:
+            testcases.append(("\n".join(inp), "\n".join(out)))
+    return question_text, testcases
 
 if question_file:
-    content = question_file.read().decode("utf-8").split("###")
-    question_text = content[0].strip()
-    testcases = []
+    filename = question_file.name
+    content = question_file.read().decode("utf-8")
 
-    if (len(content) - 1) % 2 == 0:
-        for i in range(1, len(content), 2):
-            inp, out = content[i].strip(), content[i+1].strip()
-            testcases.append((inp, out))
+    if filename.endswith(".txt"):
+        question_text, testcases = parse_txt_format(content)
+    elif filename.endswith(".json"):
+        data = json.loads(content)
+        question_text = data["question"]
+        testcases = [("\n".join(tc["input"]), "\n".join(tc["output"])) for tc in data["testcases"]]
+    else:
+        question_text, testcases = None, []
 
+    if question_text and testcases:
         # Save to DB
         with conn:
             cur = conn.cursor()
@@ -81,9 +118,8 @@ if question_file:
                 cur.execute("INSERT INTO testcases (question_id, input, output) VALUES (?, ?, ?)",
                             (qid, inp, out))
         st.sidebar.success("✅ Question uploaded and saved successfully!")
-
     else:
-        st.sidebar.error("Invalid format. Use: Question###Input1###Output1###Input2###Output2###...")
+        st.sidebar.error("Invalid format. Please follow the provided template.")
 
 # ---------- Student Mode ----------
 if mode == "Student":
@@ -121,8 +157,7 @@ if mode == "Student":
             try:
                 proc = subprocess.run(
                     ["python", "-I", tmp_path],
-                    # add an extra newline to reduce EOFError risk
-                    input=(expected_input.strip() + "\n"),
+                    input=expected_input + "\n",  # pass all inputs
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -134,7 +169,7 @@ if mode == "Student":
 
                 st.write(f"---")
                 st.subheader(f"Test Case {idx}")
-                st.write(f"**Input:**")
+                st.write("**Input:**")
                 st.code(expected_input)
                 st.write("**Program Output:**")
                 st.code(actual if actual else "(no output)")

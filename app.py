@@ -121,7 +121,8 @@ if mode == "Student":
             try:
                 proc = subprocess.run(
                     ["python", "-I", tmp_path],
-                    input=expected_input,
+                    # add an extra newline to reduce EOFError risk
+                    input=(expected_input.strip() + "\n"),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
